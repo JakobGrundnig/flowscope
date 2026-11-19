@@ -5,7 +5,8 @@
     "BlockEntityMixin",
     "BlockEntityTickerMixin",
     "BlockCapabilityMixin",
-    "BlockCapabilityCacheMixin"
+    "BlockCapabilityCacheMixin",
+    "VanillaContainerWrapperMixin"
   ],
   "client": [],
   "injectors": {

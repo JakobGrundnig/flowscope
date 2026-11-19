@@ -62,6 +62,11 @@ public final class WatchedBlock {
     int silentInteractTicks;
     /** Block entities next to the block when the neighbours were created (detects placed/removed neighbours). */
     int neighbourBlockEntities;
+    /**
+     * The container behind the item handler when it is not this block's own block entity (a shared/linked storage,
+     * e.g. a frequency-linked chest). Its committed changes are reported via VanillaContainerWrapperMixin. Null if none.
+     */
+    net.minecraft.world.Container linkedContainer;
     /** Transfers to/from adjacent blocks seen through counting handlers during the current own tick. */
     final TransferRecorder recorder = new TransferRecorder();
 

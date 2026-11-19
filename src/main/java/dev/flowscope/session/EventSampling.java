@@ -417,6 +417,7 @@ public final class EventSampling {
         unindex(b, b.posKey);
         unindex(b, b.partnerKey);
         setFlag(b, null);
+        setLinkedContainer(b, null);
         updateActive();
     }
 
@@ -442,6 +443,7 @@ public final class EventSampling {
         }
         BLOCKS.clear();
         BY_POS.clear();
+        BY_CONTAINER.clear();
         activeBlocks = 0;
         updateActive();
     }
@@ -486,6 +488,102 @@ public final class EventSampling {
             index(b, partner);
         }
         refreshNeighbours(b);
+        refreshLinkedContainer(b);
+    }
+
+    // ------------------------------------------------------------------ linked containers
+
+    /** Watched blocks whose item handler wraps a container that is not their own block entity (identity map). */
+    private static final it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap<Object, WatchedBlock[]> BY_CONTAINER =
+            new it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap<>();
+
+    /**
+     * Finds out whether the block's item handler is NeoForge's wrapper around a container other than the block entity
+     * itself (e.g. a shared, frequency-linked storage). Such containers never make the block report a change, so
+     * commits on them are reported through VanillaContainerWrapperMixin instead. Every block exposing the same
+     * container (all chests on one frequency) then sees the change.
+     */
+    private static void refreshLinkedContainer(WatchedBlock b) {
+        net.minecraft.world.Container container = null;
+        try {
+            Object handler = b.items != null ? b.items.getCapability() : null;
+            if (handler instanceof LinkedContainerAccess access) {
+                net.minecraft.world.Container c = access.flowscope$container();
+                if (!(c instanceof BlockEntity)) {
+                    container = c;
+                }
+            }
+        } catch (RuntimeException e) {
+            container = null; // unreadable here; the regular reads will report the error
+        }
+        setLinkedContainer(b, container);
+    }
+
+    private static void setLinkedContainer(WatchedBlock b, net.minecraft.world.Container container) {
+        net.minecraft.world.Container old = b.linkedContainer;
+        if (old == container) {
+            return;
+        }
+        if (old != null) {
+            WatchedBlock[] list = BY_CONTAINER.get(old);
+            if (list != null) {
+                WatchedBlock[] next = remove(list, b);
+                if (next.length == 0) {
+                    BY_CONTAINER.remove(old);
+                } else {
+                    BY_CONTAINER.put(old, next);
+                }
+            }
+        }
+        b.linkedContainer = container;
+        if (container != null) {
+            WatchedBlock[] list = BY_CONTAINER.get(container);
+            if (list == null) {
+                BY_CONTAINER.put(container, new WatchedBlock[] {b});
+            } else {
+                WatchedBlock[] next = java.util.Arrays.copyOf(list, list.length + 1);
+                next[list.length] = b;
+                BY_CONTAINER.put(container, next);
+            }
+        }
+    }
+
+    private static WatchedBlock[] remove(WatchedBlock[] list, WatchedBlock b) {
+        int idx = -1;
+        for (int i = 0; i < list.length; i++) {
+            if (list[i] == b) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx < 0) {
+            return list;
+        }
+        WatchedBlock[] next = new WatchedBlock[list.length - 1];
+        System.arraycopy(list, 0, next, 0, idx);
+        System.arraycopy(list, idx + 1, next, idx, list.length - idx - 1);
+        return next;
+    }
+
+    /** Entry point from VanillaContainerWrapperMixin: a transfer into/out of {@code container} was committed. */
+    public static void onContainerCommitted(net.minecraft.world.Container container) {
+        if (BY_CONTAINER.isEmpty()) {
+            return;
+        }
+        WatchedBlock[] blocks = BY_CONTAINER.get(container);
+        if (blocks == null) {
+            return;
+        }
+        for (WatchedBlock b : blocks) {
+            if (b.removed || b.pendingEnd != null || b.reading || Thread.currentThread() != b.serverThread) {
+                continue;
+            }
+            if (ownTickActive && b == ownBlock) {
+                b.ownChanged = true; // read once when the block's own tick ends
+                continue;
+            }
+            eventRead(b, LensSessionManager.READ_TRANSFER);
+        }
     }
 
     private static void index(WatchedBlock b, long key) {
