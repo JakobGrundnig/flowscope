@@ -142,6 +142,13 @@ public final class LensSessionManager {
         if (itemHandler == null && fluidHandler == null) {
             return failOrReopen(player, "no_inventory", restart);
         }
+        // Another part of the same multiblock (a known part, or a block handing out the very same storage object)
+        // is the same recording: reopen instead of starting over. Same mode only (whole block vs. one face).
+        if (current != null && !restart && current.block.wholeInventory == wholeInventory
+                && (current.block.ownsKey(pos.asLong()) || sharesStorage(current.block, itemHandler, fluidHandler))) {
+            reopen(player);
+            return true;
+        }
         int maxSlots = LensServerConfig.MAX_VISIBLE_SLOTS.getAsInt();
         int size;
         try {
@@ -251,6 +258,17 @@ public final class LensSessionManager {
             return false;
         }
         return fail(player, reason);
+    }
+
+    /** True if the clicked block hands out the very same item or fluid handler object as the recorded block. */
+    private static boolean sharesStorage(WatchedBlock b, ResourceHandler<ItemResource> items,
+            ResourceHandler<FluidResource> fluids) {
+        try {
+            return (items != null && b.items != null && b.items.getCapability() == items)
+                    || (fluids != null && b.fluids != null && b.fluids.getCapability() == fluids);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /** A chosen capability context; {@code side} null means the whole block. */
