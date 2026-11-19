@@ -15,9 +15,9 @@ mod-specific code; results depend on how each mod exposes and reports its storag
 | Iron Furnaces | Furnaces with and without Factory Upgrade, Auto-Pull/Auto-Push | Works | Moves into/out of neighbouring blocks during the furnace's own tick are counted as Input/Output, also with infinite sources or voiding blocks. |
 | Powah | Reactor | Works | |
 | Refined Storage | Importer, Exporter | Works with notes | These blocks have no inventory of their own, so they can't be recorded directly. Record the chest/machine they connect to; their transfers show up there. |
-| Oritech | Machines with core/extension blocks | Works with notes | Record the main machine block: processing is shown there. Recording a core block: fix for multiblock parts pending re-test. |
-| Railcraft Reborn | Coke Oven | Limited | Recording a brick showed "Snapshot (approximate)" and the oven's products as Input instead of Made. Fix for multiblock parts pending re-test. |
-| DimStorage | Dimensional Chest | Untested | Shared-frequency storage; fix for exact counting in progress. |
+| Oritech | Machines with core/extension blocks | Works with notes | Recording the main machine block shows processing. Recording a core block: fix pending re-test. |
+| Railcraft Reborn | Coke Oven | Works with notes | Processing was only detected after using the lens on a second brick; fix (parts are linked at recording start) pending re-test. |
+| DimStorage | Dimensional Chest | Works | Exact counting through the shared-frequency storage; chests on the same frequency share one recording. |
 | Applied Energistics 2 | ME Interface, Pattern Provider | Untested | |
 | Refined Storage | Interface | Untested | |
 | Productive Metalworks | Foundry | Untested | |

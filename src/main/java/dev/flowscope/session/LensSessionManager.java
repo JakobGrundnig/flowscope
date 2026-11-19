@@ -197,6 +197,8 @@ public final class LensSessionManager {
             block.lastTimerNanos = now;
             block.nextTimerTick = tick + interval;
             EventSampling.register(block); // event sampling
+            // Look for other parts sharing this storage (multiblocks) right away, on one of the next ticks.
+            block.discoveryPending = true;
         }
 
         int maxSeconds = LensServerConfig.MAX_SESSION_SECONDS.getAsInt();
@@ -264,8 +266,8 @@ public final class LensSessionManager {
     private static boolean sharesStorage(WatchedBlock b, ResourceHandler<ItemResource> items,
             ResourceHandler<FluidResource> fluids) {
         try {
-            return (items != null && b.items != null && b.items.getCapability() == items)
-                    || (fluids != null && b.fluids != null && b.fluids.getCapability() == fluids);
+            return (items != null && b.items != null && HandlerIdentity.sameStorageBoth(b.items.getCapability(), items))
+                    || (fluids != null && b.fluids != null && HandlerIdentity.sameStorageBoth(b.fluids.getCapability(), fluids));
         } catch (RuntimeException e) {
             return false;
         }

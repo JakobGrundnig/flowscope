@@ -706,6 +706,9 @@ public final class EventSampling {
         if (items == null && fluids == null) {
             return;
         }
+        // What the recorded block's handler forwards to (e.g. a part's thin wrapper around the controller's storage).
+        Object innerItems = items != null ? HandlerIdentity.inner(items, true) : null;
+        Object innerFluids = fluids != null ? HandlerIdentity.inner(fluids, true) : null;
         ArrayList<BlockEntity> found = new ArrayList<>();
         int checked = 0;
         int minCx = (b.pos.getX() - ALIAS_RADIUS) >> 4;
@@ -732,8 +735,10 @@ public final class EventSampling {
                         break outer;
                     }
                     try {
-                        if ((items != null && b.level.getCapability(Capabilities.Item.BLOCK, p, be.getBlockState(), be, null) == items)
-                                || (fluids != null && b.level.getCapability(Capabilities.Fluid.BLOCK, p, be.getBlockState(), be, null) == fluids)) {
+                        if ((items != null && HandlerIdentity.sameStorage(items, innerItems,
+                                        b.level.getCapability(Capabilities.Item.BLOCK, p, be.getBlockState(), be, null)))
+                                || (fluids != null && HandlerIdentity.sameStorage(fluids, innerFluids,
+                                        b.level.getCapability(Capabilities.Fluid.BLOCK, p, be.getBlockState(), be, null)))) {
                             found.add(be);
                             if (found.size() >= ALIAS_MAX) {
                                 break outer;
