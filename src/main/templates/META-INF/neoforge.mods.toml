@@ -1,0 +1,33 @@
+modLoader="javafml"
+loaderVersion="[1,)"
+license="${mod_license}"
+issueTrackerURL="https://github.com/JakobGrundnig/flowscope/issues"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+authors="Jakob Grundnig"
+displayURL="https://github.com/JakobGrundnig/flowscope"
+description='''
+A handheld lens that temporarily records how a chest or machine's items and fluids change over time.
+Opt-in, bounded and read-only: it does no work unless a player is actively recording.
+'''
+
+# Event-based sampling hook (BlockEntity.setChanged). Remove together with the mixin package to revert.
+[[mixins]]
+    config="${mod_id}.mixins.json"
+
+[[dependencies.${mod_id}]]
+    modId="neoforge"
+    type="required"
+    versionRange="[${neo_version},)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.${mod_id}]]
+    modId="minecraft"
+    type="required"
+    versionRange="${minecraft_version_range}"
+    ordering="NONE"
+    side="BOTH"
