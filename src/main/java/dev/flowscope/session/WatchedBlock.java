@@ -67,6 +67,32 @@ public final class WatchedBlock {
      * e.g. a frequency-linked chest). Its committed changes are reported via VanillaContainerWrapperMixin. Null if none.
      */
     net.minecraft.world.Container linkedContainer;
+    // ---- multiblock parts ----
+    /**
+     * Other block entities that hand out the very same item/fluid handler object (e.g. the controller and the other
+     * parts of a multiblock whose parts forward to it). Their setChanged() and own ticks count as this block's own.
+     */
+    long[] aliasKeys = new long[0];
+    BlockEntity[] aliasBlockEntities = new BlockEntity[0];
+    /** A search for such block entities is due (set when a safety-net read finds unreported changes). */
+    boolean discoveryPending;
+    /** Earliest time for the next search (nanoTime); 0 = never searched. */
+    long nextDiscoveryNanos;
+
+    /** True if {@code key} is this block, its double-chest half or one of its aliases. */
+    boolean ownsKey(long key) {
+        if (key == posKey || key == partnerKey) {
+            return true;
+        }
+        long[] keys = aliasKeys;
+        for (int i = 0; i < keys.length; i++) {
+            if (keys[i] == key) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Transfers to/from adjacent blocks seen through counting handlers during the current own tick. */
     final TransferRecorder recorder = new TransferRecorder();
 

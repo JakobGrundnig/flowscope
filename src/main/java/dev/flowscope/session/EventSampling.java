@@ -115,7 +115,7 @@ public final class EventSampling {
             return;
         }
         for (WatchedBlock b : blocks) {
-            if (b.level == level && b.posKey == key && !b.removed) {
+            if (b.level == level && !b.removed && (b.posKey == key || b.ownsKey(key))) {
                 ownTickActive = true;
                 ownLevel = level;
                 ownKey = key;
@@ -345,7 +345,7 @@ public final class EventSampling {
             Neighbour n = ownBlock != null ? ownBlock.neighbour(key) : null;
             if (n != null) {
                 n.changedThisTick = true;
-            } else if (ownBlock == null || key != ownBlock.partnerKey) {
+            } else if (ownBlock == null || !ownBlock.ownsKey(key)) {
                 neighbourChanged = true;
             }
         }
@@ -357,7 +357,7 @@ public final class EventSampling {
             if (b.level != level) {
                 continue;
             }
-            if (b.posKey != key && b.partnerKey != key) {
+            if (!b.ownsKey(key)) {
                 // A neighbour of a watched machine changed outside the machine's tick: refresh it before the next one.
                 Neighbour n = b.neighbour(key);
                 if (n != null && !(ownTickActive && b == ownBlock)) {
@@ -368,7 +368,7 @@ public final class EventSampling {
             if (b.removed || b.pendingEnd != null || b.reading || Thread.currentThread() != b.serverThread) {
                 continue; // off-thread or re-entrant: the timer read catches it
             }
-            if (ownTickActive && level == ownLevel && b.posKey == ownKey) {
+            if (ownTickActive && level == ownLevel && b == ownBlock) {
                 b.ownChanged = true; // read once when the block's own tick ends
                 continue;
             }
@@ -418,6 +418,7 @@ public final class EventSampling {
         unindex(b, b.partnerKey);
         setFlag(b, null);
         setLinkedContainer(b, null);
+        clearAliases(b);
         updateActive();
     }
 
@@ -434,6 +435,11 @@ public final class EventSampling {
         for (WatchedBlock b : BLOCKS) {
             b.removed = true;
             setFlag(b, null);
+            for (BlockEntity alias : b.aliasBlockEntities) {
+                if (alias instanceof LensWatchedFlag flag) {
+                    flag.flowscope$setWatched(false);
+                }
+            }
             if (b.neighbours != null) {
                 for (Neighbour n : b.neighbours) {
                     n.discarded = true;
@@ -649,15 +655,138 @@ public final class EventSampling {
     }
 
     private static boolean flaggedByOther(BlockEntity be, WatchedBlock except) {
-        WatchedBlock[] blocks = BY_POS.get(except.posKey);
+        WatchedBlock[] blocks = BY_POS.get(be.getBlockPos().asLong());
         if (blocks != null) {
             for (WatchedBlock other : blocks) {
-                if (other != except && !other.removed && other.flaggedBlockEntity == be) {
+                if (other == except || other.removed) {
+                    continue;
+                }
+                if (other.flaggedBlockEntity == be) {
                     return true;
+                }
+                for (BlockEntity alias : other.aliasBlockEntities) {
+                    if (alias == be) {
+                        return true;
+                    }
                 }
             }
         }
         return false;
+    }
+
+    // ------------------------------------------------------------------ multiblock parts (aliases)
+
+    /** Search radius around the recorded block, in blocks, and the most block entities examined per search. */
+    private static final int ALIAS_RADIUS = 8;
+    private static final int ALIAS_MAX_CHECKED = 512;
+    private static final int ALIAS_MAX = 64;
+    private static final long ALIAS_RETRY_NANOS = 60L * NANOS_PER_SECOND;
+
+    /**
+     * Multiblocks often let every part hand out the controller's storage, while only the controller ticks and reports
+     * changes. When a recorded block shows changes it never reported, look once (bounded) for nearby block entities
+     * whose item/fluid handler is the very same object (identity, so unrelated blocks never match) and treat them as
+     * part of the recorded block: their setChanged() and own ticks then count as the block's own. No mod-specific
+     * code. Runs at most once per tick server-wide and at most once per minute per recording.
+     */
+    static void discoverAliases(WatchedBlock b, long now) {
+        b.discoveryPending = false;
+        b.nextDiscoveryNanos = now + ALIAS_RETRY_NANOS;
+        if (b.removed || !b.level.isLoaded(b.pos)) {
+            return;
+        }
+        Object items;
+        Object fluids;
+        try {
+            items = b.items != null ? b.items.getCapability() : null;
+            fluids = b.fluids != null ? b.fluids.getCapability() : null;
+        } catch (RuntimeException e) {
+            return;
+        }
+        if (items == null && fluids == null) {
+            return;
+        }
+        ArrayList<BlockEntity> found = new ArrayList<>();
+        int checked = 0;
+        int minCx = (b.pos.getX() - ALIAS_RADIUS) >> 4;
+        int maxCx = (b.pos.getX() + ALIAS_RADIUS) >> 4;
+        int minCz = (b.pos.getZ() - ALIAS_RADIUS) >> 4;
+        int maxCz = (b.pos.getZ() + ALIAS_RADIUS) >> 4;
+        outer:
+        for (int cx = minCx; cx <= maxCx; cx++) {
+            for (int cz = minCz; cz <= maxCz; cz++) {
+                net.minecraft.world.level.chunk.LevelChunk chunk = b.level.getChunkSource().getChunkNow(cx, cz);
+                if (chunk == null) {
+                    continue; // never load chunks
+                }
+                for (BlockEntity be : chunk.getBlockEntities().values()) {
+                    BlockPos p = be.getBlockPos();
+                    long key = p.asLong();
+                    if (key == b.posKey || key == b.partnerKey
+                            || Math.abs(p.getX() - b.pos.getX()) > ALIAS_RADIUS
+                            || Math.abs(p.getY() - b.pos.getY()) > ALIAS_RADIUS
+                            || Math.abs(p.getZ() - b.pos.getZ()) > ALIAS_RADIUS) {
+                        continue;
+                    }
+                    if (++checked > ALIAS_MAX_CHECKED) {
+                        break outer;
+                    }
+                    try {
+                        if ((items != null && b.level.getCapability(Capabilities.Item.BLOCK, p, be.getBlockState(), be, null) == items)
+                                || (fluids != null && b.level.getCapability(Capabilities.Fluid.BLOCK, p, be.getBlockState(), be, null) == fluids)) {
+                            found.add(be);
+                            if (found.size() >= ALIAS_MAX) {
+                                break outer;
+                            }
+                        }
+                    } catch (RuntimeException e) {
+                        // an untrusted capability provider failed: skip that block
+                    }
+                }
+            }
+        }
+        setAliases(b, found);
+        if (!found.isEmpty()) {
+            // Changes are now reported through the other parts: give event mode a fresh chance.
+            b.hasUnreported = false;
+            b.everyTickFallback = false;
+            b.reportedChanges = 0;
+        }
+    }
+
+    private static void setAliases(WatchedBlock b, java.util.List<BlockEntity> aliases) {
+        clearAliases(b);
+        int n = aliases.size();
+        long[] keys = new long[n];
+        BlockEntity[] bes = new BlockEntity[n];
+        for (int i = 0; i < n; i++) {
+            BlockEntity be = aliases.get(i);
+            bes[i] = be;
+            keys[i] = be.getBlockPos().asLong();
+        }
+        b.aliasKeys = keys;
+        b.aliasBlockEntities = bes;
+        for (int i = 0; i < n; i++) {
+            index(b, keys[i]);
+            if (bes[i] instanceof LensWatchedFlag flag) {
+                flag.flowscope$setWatched(true);
+            }
+        }
+    }
+
+    private static void clearAliases(WatchedBlock b) {
+        long[] keys = b.aliasKeys;
+        BlockEntity[] bes = b.aliasBlockEntities;
+        b.aliasKeys = new long[0];
+        b.aliasBlockEntities = new BlockEntity[0];
+        for (int i = 0; i < keys.length; i++) {
+            if (keys[i] != b.posKey && keys[i] != b.partnerKey) {
+                unindex(b, keys[i]);
+            }
+            if (bes[i] instanceof LensWatchedFlag flag && bes[i] != b.flaggedBlockEntity && !flaggedByOther(bes[i], b)) {
+                flag.flowscope$setWatched(false);
+            }
+        }
     }
 
     /** True if changes are being caught through setChanged() (no unreported change found recently). */

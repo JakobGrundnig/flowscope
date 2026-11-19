@@ -492,8 +492,7 @@ public final class LensScreen extends Screen {
         g.text(font, ellipsize(status, innerW - lh - 3), innerX + lh + 3, y, recording ? COL_TEXT : COL_WARN);
         y += lh + 2;
 
-        Component info = Component.translatable("flowscope.screen.face_sample", faceName,
-                sampleIntervalTicks, formatInterval());
+        Component info = Component.translatable("flowscope.screen.face_sample", faceName, formatInterval());
         g.text(font, ellipsize(info, innerW), innerX, y, COL_MUTED);
         y += lh + 2;
 
@@ -784,8 +783,10 @@ public final class LensScreen extends Screen {
     }
 
     private Component formatInterval() {
+        // The measured average time between safety-net reads (shorter when small inventories are read every tick);
+        // until a measurement exists, the configured interval.
         if (stats == null || stats.effectiveIntervalMs() <= 0) {
-            return Component.translatable("flowscope.screen.interval_pending");
+            return Component.translatable("flowscope.screen.interval_ticks", sampleIntervalTicks);
         }
         return Component.literal(String.format(Locale.ROOT, "%.2f s", stats.effectiveIntervalMs() / 1000.0));
     }

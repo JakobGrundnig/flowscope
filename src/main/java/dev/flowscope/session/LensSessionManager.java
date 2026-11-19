@@ -323,10 +323,15 @@ public final class LensSessionManager {
             int coalesceBudget = LensServerConfig.MAX_EVENT_READS_PER_TICK.getAsInt();
             int timerBudget = LensServerConfig.MAX_READS_PER_TICK.getAsInt();
             int start = Math.floorMod(roundRobin++, n);
+            boolean discovered = false; // at most one multiblock-part search per tick, server-wide
             for (int k = 0; k < n; k++) {
                 WatchedBlock b = blocks.get((start + k) % n);
                 if (b.removed) {
                     continue;
+                }
+                if (b.discoveryPending && !discovered) {
+                    discovered = true;
+                    EventSampling.discoverAliases(b, now); // event sampling
                 }
                 SessionState reason = b.pendingEnd;
                 if (reason == null && b.dirty && coalesceBudget > 0) {
@@ -456,6 +461,10 @@ public final class LensSessionManager {
             // inventories every tick (still within maxReadsPerTick) so fewer changes cancel out.
             if (b.lastSize <= LensServerConfig.EVERY_TICK_FALLBACK_MAX_SLOTS.getAsInt()) {
                 b.everyTickFallback = true;
+            }
+            // Maybe the storage belongs to another block (multiblock controller): look for it (bounded, rarely).
+            if (now - b.nextDiscoveryNanos >= 0 || b.nextDiscoveryNanos == 0) {
+                b.discoveryPending = true;
             }
         }
         LensSession[] sessions = b.sessions;
