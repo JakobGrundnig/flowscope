@@ -15,7 +15,7 @@ Install on both client and server.
 
 ## How to use
 - Craft the Flowscope: glass pane on top, redstone in the middle, copper ingots on the sides and bottom.
-- Right-click a block to start recording it. Sneak + right-click records only the clicked side.
+- Right-click a block to start recording it (its whole inventory, all sides).
 - Closing the screen keeps the recording running. Use the Flowscope again to reopen it.
 - A recording stops after 5 minutes (configurable), on Stop, or when you record another block.
 

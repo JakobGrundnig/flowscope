@@ -21,8 +21,6 @@ public final class WatchedBlock {
     final ServerLevel level;
     final BlockPos pos;
     final long posKey;
-    /** Whole-block view (normal use) vs. clicked-face view (sneak use). */
-    final boolean wholeInventory;
     final Block block;
     final Thread serverThread = Thread.currentThread();
 
@@ -122,12 +120,11 @@ public final class WatchedBlock {
     /** Slots + tanks seen at the last read. */
     int lastSize;
 
-    WatchedBlock(ServerLevel level, BlockPos pos, boolean wholeInventory, Block block, int sampleIntervalTicks,
+    WatchedBlock(ServerLevel level, BlockPos pos, Block block, int sampleIntervalTicks,
             boolean hasItems, Direction itemContext, boolean hasFluids, Direction fluidContext) {
         this.level = level;
         this.pos = pos.immutable();
         this.posKey = this.pos.asLong();
-        this.wholeInventory = wholeInventory;
         this.block = block;
         this.sampleIntervalTicks = sampleIntervalTicks;
         // Listeners stay registered only while the block is watched (isValid returns false afterwards).
@@ -137,8 +134,8 @@ public final class WatchedBlock {
                 () -> !removed, () -> { }) : null;
     }
 
-    boolean matches(ServerLevel level, BlockPos pos, boolean wholeInventory) {
-        return this.level == level && this.posKey == pos.asLong() && this.wholeInventory == wholeInventory;
+    boolean matches(ServerLevel level, BlockPos pos) {
+        return this.level == level && this.posKey == pos.asLong();
     }
 
     void addSession(LensSession s) {

@@ -71,7 +71,7 @@ public final class LensSessionManager {
 
     /** Final screen state of a finished recording, kept (one per player) so the screen can be reopened. */
     private record LastResult(OpenLensScreenPayload open, LensStatsPayload stats, ServerLevel level, BlockPos pos,
-            Direction face, boolean wholeInventory) {
+            Direction face) {
     }
 
     private LensSessionManager() {
@@ -84,15 +84,14 @@ public final class LensSessionManager {
      * Called from the lens item on the server.
      */
     public static boolean tryStart(ServerPlayer player, ServerLevel level, BlockPos pos, Direction face) {
-        return start(player, level, pos, face, !player.isSecondaryUseActive(), false);
+        return start(player, level, pos, face, false);
     }
 
     /**
-     * @param wholeInventory read the whole inventory (normal use) instead of only the clicked face (sneak use)
-     * @param restart        started by Restart in an ended window: failures always show their reason
+     * @param restart started by Restart in an ended window: failures always show their reason
      */
     private static boolean start(ServerPlayer player, ServerLevel level, BlockPos pos, Direction face,
-            boolean wholeInventory, boolean restart) {
+            boolean restart) {
         if (player.isSpectator()) {
             return failOrReopen(player, "denied", restart);
         }
@@ -115,24 +114,24 @@ public final class LensSessionManager {
 
         // Clicking the block that is already being recorded just reopens the screen (no reset; Restart does that).
         LensSession current = activeFor(player);
-        if (current != null && current.block.matches(level, pos, wholeInventory)) {
+        if (current != null && current.block.matches(level, pos)) {
             reopen(player);
             return true;
         }
 
         // Item storage and fluid storage (tanks), looked up the same way: the whole block first (context null =
         // "all sides / internal" by NeoForge convention), so machines show input, fuel and output together and
-        // per-face configuration does not matter; the clicked face as fallback. Sneak-use records only the clicked
-        // face. Faces are never summed. A block qualifies if it has either kind.
+        // per-face configuration does not matter; the clicked face only as a fallback for blocks that offer storage
+        // per side only. Faces are never summed. A block qualifies if it has either kind.
         ResourceHandler<ItemResource> itemHandler;
         ResourceHandler<FluidResource> fluidHandler;
         Direction itemContext;
         Direction fluidContext;
         try {
-            Context ic = pickContext(level, pos, state, be, Capabilities.Item.BLOCK, face, wholeInventory);
+            Context ic = pickContext(level, pos, state, be, Capabilities.Item.BLOCK, face);
             itemContext = ic != null ? ic.side() : null;
             itemHandler = ic == null ? null : level.getCapability(Capabilities.Item.BLOCK, pos, state, be, itemContext);
-            Context fc = pickContext(level, pos, state, be, Capabilities.Fluid.BLOCK, face, wholeInventory);
+            Context fc = pickContext(level, pos, state, be, Capabilities.Fluid.BLOCK, face);
             fluidContext = fc != null ? fc.side() : null;
             fluidHandler = fc == null ? null : level.getCapability(Capabilities.Fluid.BLOCK, pos, state, be, fluidContext);
         } catch (RuntimeException e) {
@@ -144,7 +143,7 @@ public final class LensSessionManager {
         }
         // Another part of the same multiblock (a known part, or a block handing out the very same storage object)
         // is the same recording: reopen instead of starting over. Same mode only (whole block vs. one face).
-        if (current != null && !restart && current.block.wholeInventory == wholeInventory
+        if (current != null && !restart
                 && (current.block.ownsKey(pos.asLong()) || sharesStorage(current.block, itemHandler, fluidHandler))) {
             reopen(player);
             return true;
@@ -177,9 +176,9 @@ public final class LensSessionManager {
         int interval = LensServerConfig.SAMPLE_INTERVAL_TICKS.getAsInt();
 
         // Share the reader if someone already watches this inventory; otherwise create it and take the baseline.
-        WatchedBlock block = EventSampling.find(level, pos, wholeInventory);
+        WatchedBlock block = EventSampling.find(level, pos);
         if (block == null) {
-            block = new WatchedBlock(level, pos, wholeInventory, state.getBlock(), interval,
+            block = new WatchedBlock(level, pos, state.getBlock(), interval,
                     itemHandler != null, itemContext, fluidHandler != null, fluidContext);
             try {
                 if ((itemHandler != null && block.itemDiff.read(itemHandler, maxSlots) == SnapshotDiff.TOO_LARGE)
@@ -279,17 +278,14 @@ public final class LensSessionManager {
 
     /**
      * Chooses the capability context to read: the whole block if it exposes slots there, else the clicked face if
-     * that exposes slots, else null (this kind of storage is not present). Sneak use (wholeInventory false) only
-     * considers the clicked face.
+     * that exposes slots (blocks that only offer storage per side), else null (this kind of storage is not present).
      */
     private static <T extends ResourceHandler<?>> Context pickContext(ServerLevel level, BlockPos pos,
             BlockState state, BlockEntity be, net.neoforged.neoforge.capabilities.BlockCapability<T, Direction> cap,
-            Direction face, boolean wholeInventory) {
-        if (wholeInventory) {
-            T h = level.getCapability(cap, pos, state, be, null);
-            if (h != null && h.size() > 0) {
-                return new Context(null);
-            }
+            Direction face) {
+        T whole = level.getCapability(cap, pos, state, be, null);
+        if (whole != null && whole.size() > 0) {
+            return new Context(null);
         }
         T h = level.getCapability(cap, pos, state, be, face);
         return h != null && h.size() > 0 ? new Context(face) : null;
@@ -852,8 +848,7 @@ public final class LensSessionManager {
             // Final result with all lists, bounded (top entries per list), one per player.
             LensStatsPayload last = buildStats(s, reason, true);
             WatchedBlock b = s.block;
-            LAST_RESULTS.put(s.player.getUUID(), new LastResult(s.openPayload, last, b.level, b.pos, s.face,
-                    b.wholeInventory));
+            LAST_RESULTS.put(s.player.getUUID(), new LastResult(s.openPayload, last, b.level, b.pos, s.face));
             if (notify) {
                 if (s.viewOpen) {
                     PacketDistributor.sendToPlayer(s.player, last);
@@ -898,7 +893,7 @@ public final class LensSessionManager {
             LastResult last = LAST_RESULTS.get(player.getUUID());
             if (payload.action() == LensActionPayload.RESTART && last != null
                     && last.open().sessionId() == payload.sessionId()) {
-                start(player, last.level(), last.pos(), last.face(), last.wholeInventory(), true);
+                start(player, last.level(), last.pos(), last.face(), true);
             }
             return;
         }

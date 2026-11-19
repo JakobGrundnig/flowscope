@@ -454,11 +454,11 @@ public final class EventSampling {
         updateActive();
     }
 
-    static WatchedBlock find(Level level, BlockPos pos, boolean wholeInventory) {
+    static WatchedBlock find(Level level, BlockPos pos) {
         WatchedBlock[] blocks = BY_POS.get(pos.asLong());
         if (blocks != null) {
             for (WatchedBlock b : blocks) {
-                if (!b.removed && b.posKey == pos.asLong() && b.level == level && b.wholeInventory == wholeInventory) {
+                if (!b.removed && b.posKey == pos.asLong() && b.level == level) {
                     return b;
                 }
             }
