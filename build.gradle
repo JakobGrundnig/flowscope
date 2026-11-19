@@ -160,6 +160,15 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
 }
 
+// Ship the MIT licence text inside the JAR (the licence requires it to accompany copies).
+def licenseName = "LICENSE_${mod_id}".toString()
+tasks.named('jar', Jar).configure {
+    from(layout.projectDirectory.file('LICENSE')) {
+        rename { licenseName }
+        into('META-INF')
+    }
+}
+
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.
 idea {
     module {
