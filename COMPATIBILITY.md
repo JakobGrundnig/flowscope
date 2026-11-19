@@ -18,10 +18,16 @@ mod-specific code; results depend on how each mod exposes and reports its storag
 | Oritech | Machines with core/extension blocks | Works | Recording the main block or any core shows the machine's processing; using the lens on another part of the same machine reopens the running recording. |
 | Railcraft Reborn | Coke Oven | Works | Any brick can be recorded; processing (Made/Used up) is shown. |
 | DimStorage | Dimensional Chest | Works | Exact counting through the shared-frequency storage; chests on the same frequency share one recording. |
+| FTB Chunks | Claimed chunks of another team | Works | Blocks in chunks you can't interact with are refused ("You can't inspect this block"). |
 | Applied Energistics 2 | ME Interface, Pattern Provider | Untested | |
 | Refined Storage | Interface | Untested | |
 | Productive Metalworks | Foundry | Untested | |
 | Railcraft Reborn | Iron/Steel Tank | Untested | |
+
+## Server
+
+- **Dedicated server:** starts cleanly with Flowscope installed (no client-only code loaded on the server).
+- **Multiplayer with two or more players recording at the same time:** untested.
 
 ## Known limits
 
