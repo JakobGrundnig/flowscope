@@ -34,6 +34,7 @@ import net.minecraft.resources.Identifier;
  * @param hasItems           the block has item storage (item rates apply)
  * @param hasFluids          the block has fluid storage (fluid rates apply; graph shows fluids if !hasItems)
  * @param fluidInPerMin      fluid rates in mB per minute (never summed with items)
+ * @param hiddenTransfers    the block keeps moving things to/from neighbours but nothing can be measured
  */
 public record LensStatsPayload(int sessionId, int state, int elapsedMs, int maxMs, int samples, boolean warmingUp,
         double increasePerMin, double decreasePerMin, int effectiveIntervalMs, boolean eventMode,
@@ -41,7 +42,7 @@ public record LensStatsPayload(int sessionId, int state, int elapsedMs, int maxM
         boolean breakdownAvailable, boolean processing, double producedPerMin, double consumedPerMin,
         List<ItemBreakdown.Summary> items,
         boolean hasItems, boolean hasFluids, double fluidInPerMin, double fluidOutPerMin, double fluidMadePerMin,
-        double fluidUsedPerMin)
+        double fluidUsedPerMin, boolean hiddenTransfers)
         implements CustomPacketPayload {
 
     private static final int KIND_ITEM = 0;
@@ -123,6 +124,7 @@ public record LensStatsPayload(int sessionId, int state, int elapsedMs, int maxM
                 buf.writeDouble(p.fluidOutPerMin);
                 buf.writeDouble(p.fluidMadePerMin);
                 buf.writeDouble(p.fluidUsedPerMin);
+                buf.writeBoolean(p.hiddenTransfers);
             },
             buf -> new LensStatsPayload(
                     buf.readVarInt(),
@@ -147,7 +149,8 @@ public record LensStatsPayload(int sessionId, int state, int elapsedMs, int maxM
                     buf.readDouble(),
                     buf.readDouble(),
                     buf.readDouble(),
-                    buf.readDouble()));
+                    buf.readDouble(),
+                    buf.readBoolean()));
 
     private static List<ItemBreakdown.Summary> readSummaries(RegistryFriendlyByteBuf buf) {
         int lists = buf.readVarInt();

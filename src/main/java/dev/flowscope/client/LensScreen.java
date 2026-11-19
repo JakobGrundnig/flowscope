@@ -212,7 +212,7 @@ public final class LensScreen extends Screen {
     // ------------------------------------------------------------------ layout
 
     private int computeLayoutKey() {
-        int key = (isEventMode() ? 1 : 0) + (isProcessing() ? 2 : 0);
+        int key = (isEventMode() ? 1 : 0) + (isProcessing() ? 2 : 0) + (stats != null && stats.hiddenTransfers() ? 4 : 0);
         for (Section s : sections) {
             key = key * 31 + (s.expanded ? s.contentRows() : 0);
         }
@@ -235,7 +235,8 @@ public final class LensScreen extends Screen {
             secUsed.expanded = false;
         }
 
-        String warningKey = isEventMode() ? "flowscope.screen.event_note" : "flowscope.screen.approximate";
+        String warningKey = stats != null && stats.hiddenTransfers() ? "flowscope.screen.hidden_note"
+                : isEventMode() ? "flowscope.screen.event_note" : "flowscope.screen.approximate";
         String warningShortKey = isEventMode() ? "flowscope.screen.event_note_short" : "flowscope.screen.approximate_short";
         warningLines = font.split(Component.translatable(warningKey), innerW);
 

@@ -11,6 +11,10 @@ import dev.flowscope.network.LensActionPayload;
 import dev.flowscope.network.LensStatsPayload;
 import dev.flowscope.network.OpenLensScreenPayload;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.objects.Object2LongMap;
+import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap;
+import it.unimi.dsi.fastutil.objects.ObjectIterator;
+import net.neoforged.neoforge.transfer.resource.Resource;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
@@ -44,6 +48,8 @@ public final class LensSessionManager {
     private static final long NANOS_PER_SECOND = 1_000_000_000L;
     private static final long LOG_INTERVAL_NANOS = 30L * NANOS_PER_SECOND;
     private static final int SLOW_SAFETY_NET_TICKS = 100;
+    /** Own ticks in a row with neighbour activity but nothing measurable before the window shows a hint. */
+    private static final int HIDDEN_TRANSFER_TICKS = 20;
     /** Player/timeout checks run once per second per recording (staggered by id). */
     private static final int CHECK_INTERVAL_TICKS = 20;
 
@@ -462,6 +468,215 @@ public final class LensSessionManager {
         return null;
     }
 
+    // Reused working maps for attributed reads (server thread only).
+    private static final Object2LongOpenHashMap<Resource> ATTR_IN = new Object2LongOpenHashMap<>();
+    private static final Object2LongOpenHashMap<Resource> ATTR_OUT = new Object2LongOpenHashMap<>();
+    private static final Object2LongOpenHashMap<Resource> ATTR_RESIDUAL = new Object2LongOpenHashMap<>();
+
+    /**
+     * End of a machine's own tick in which it or its neighbours changed. Reads the machine and every neighbour that
+     * changed during the tick, then splits per item/fluid identity:
+     * <ul>
+     * <li>a neighbour's loss went into the machine (Input), a neighbour's gain came out of it (Output);</li>
+     * <li>the rest of the machine's own change is its processing: machine change = Input - Output + Made - Used up,
+     * so Made - Used up = machine change + neighbours' net change (positive = Made, negative = Used up).</li>
+     * </ul>
+     * If something else changed during the tick that cannot be measured (a non-adjacent block, a neighbour without
+     * storage, a neighbour whose shadow was outdated), the rest counts as transfers instead (the plain rule).
+     * This catches machines that process, auto-push and auto-pull within one tick (whose own inventory nets to 0).
+     */
+    static SessionState readAttributed(WatchedBlock b, long now, int maxSlots, boolean foreign) {
+        if (!b.level.isLoaded(b.pos)) {
+            return SessionState.CHUNK_UNLOADED;
+        }
+        if (b.level.getBlockState(b.pos).getBlock() != b.block) {
+            return SessionState.TARGET_REMOVED;
+        }
+        boolean itemsCompared;
+        boolean fluidsCompared;
+        b.reading = true;
+        try {
+            ResourceHandler<ItemResource> ih = b.items != null ? b.items.getCapability() : null;
+            ResourceHandler<FluidResource> fh = b.fluids != null ? b.fluids.getCapability() : null;
+            if (ih == null && fh == null) {
+                return SessionState.NO_INVENTORY;
+            }
+            int itemResult = ih != null ? b.itemDiff.read(ih, maxSlots) : -1;
+            int fluidResult = fh != null ? b.fluidDiff.read(fh, maxSlots) : -1;
+            if (itemResult == SnapshotDiff.TOO_LARGE || fluidResult == SnapshotDiff.TOO_LARGE) {
+                return SessionState.TOO_LARGE;
+            }
+            itemsCompared = itemResult == SnapshotDiff.COMPARED;
+            fluidsCompared = fluidResult == SnapshotDiff.COMPARED;
+        } catch (RuntimeException e) {
+            logError("snapshot", b.pos, e);
+            return SessionState.ERROR;
+        } finally {
+            b.reading = false;
+        }
+
+        ATTR_IN.clear();
+        ATTR_OUT.clear();
+        ATTR_RESIDUAL.clear();
+        if (itemsCompared) {
+            addDeltas(ATTR_RESIDUAL, b.itemDiff.deltas());
+        }
+        if (fluidsCompared) {
+            addDeltas(ATTR_RESIDUAL, b.fluidDiff.deltas());
+        }
+        // Exact transfers seen through counting handlers (committed only). A far-away change during the tick is then
+        // the consequence of such a transfer (e.g. a pipe passing items on), not an unmeasured move.
+        TransferRecorder rec = b.recorder;
+        int captured = rec.committedCount();
+        for (int i = 0; i < captured; i++) {
+            Resource r = rec.resource(i);
+            long amount = rec.amount(i);
+            if (rec.direction(i) == TransferRecorder.IN) {
+                ATTR_IN.addTo(r, amount);
+                ATTR_RESIDUAL.addTo(r, -amount);
+            } else {
+                ATTR_OUT.addTo(r, amount);
+                ATTR_RESIDUAL.addTo(r, amount);
+            }
+        }
+        boolean unmeasured = foreign && captured == 0;
+        boolean interacted = foreign || captured > 0;
+        Neighbour[] ns = b.neighbours;
+        if (ns != null) {
+            for (Neighbour n : ns) {
+                if (!n.changedThisTick) {
+                    continue;
+                }
+                n.changedThisTick = false;
+                interacted = true;
+                boolean wasStale = n.stale;
+                n.stale = !n.read(maxSlots);
+                if (captured > 0 && rec.touched(n.posKey)) {
+                    continue; // already counted exactly through its handler; the read only refreshed the shadow
+                }
+                if (wasStale || n.stale) {
+                    unmeasured = true; // its change during this tick cannot be told apart from earlier changes
+                    continue;
+                }
+                addNeighbourDeltas(n.itemDiff);
+                addNeighbourDeltas(n.fluidDiff);
+            }
+        }
+        rec.reset();
+
+        // Totals per category and kind (items vs. mB), computed once for all recordings of this block.
+        long[] totals = new long[8]; // itemIn, itemOut, itemMade, itemUsed, fluidIn, fluidOut, fluidMade, fluidUsed
+        sumInto(ATTR_IN, totals, 0, 4, true);
+        sumInto(ATTR_OUT, totals, 1, 5, true);
+        boolean residualIsProcess = !unmeasured;
+        for (ObjectIterator<Object2LongMap.Entry<Resource>> it = ATTR_RESIDUAL.object2LongEntrySet().fastIterator(); it.hasNext(); ) {
+            Object2LongMap.Entry<Resource> e = it.next();
+            long v = e.getLongValue();
+            boolean fluid = e.getKey() instanceof FluidResource;
+            if (v > 0) {
+                int idx = (residualIsProcess ? 2 : 0) + (fluid ? 4 : 0);
+                totals[idx] = SnapshotDiff.saturatedAdd(totals[idx], v);
+            } else if (v < 0) {
+                int idx = (residualIsProcess ? 3 : 1) + (fluid ? 4 : 0);
+                totals[idx] = SnapshotDiff.saturatedAdd(totals[idx], v == Long.MIN_VALUE ? Long.MAX_VALUE : -v);
+            }
+        }
+        boolean counted = false;
+        for (long t : totals) {
+            counted |= t != 0;
+        }
+        if (counted) {
+            b.reportedChanges++;
+            b.silentInteractTicks = 0;
+        } else if (interacted) {
+            b.silentInteractTicks++; // it moved things around, but nothing measurable changed
+        }
+
+        for (LensSession s : b.sessions) {
+            if (s.ended) {
+                continue;
+            }
+            s.samples++;
+            long second = (now - s.startNanos) / NANOS_PER_SECOND;
+            s.totalIncrease = SnapshotDiff.saturatedAdd(s.totalIncrease, totals[0]);
+            s.totalDecrease = SnapshotDiff.saturatedAdd(s.totalDecrease, totals[1]);
+            s.totalProduced = SnapshotDiff.saturatedAdd(s.totalProduced, totals[2]);
+            s.totalConsumed = SnapshotDiff.saturatedAdd(s.totalConsumed, totals[3]);
+            s.fluidIn = SnapshotDiff.saturatedAdd(s.fluidIn, totals[4]);
+            s.fluidOut = SnapshotDiff.saturatedAdd(s.fluidOut, totals[5]);
+            s.fluidMade = SnapshotDiff.saturatedAdd(s.fluidMade, totals[6]);
+            s.fluidUsed = SnapshotDiff.saturatedAdd(s.fluidUsed, totals[7]);
+            s.window.add(second, totals[0], totals[1]);
+            s.processWindow.add(second, totals[2], totals[3]);
+            s.fluidWindow.add(second, totals[4], totals[5]);
+            s.fluidProcessWindow.add(second, totals[6], totals[7]);
+            if (counted && s.breakdown != null) {
+                recordMap(s.breakdown, ATTR_IN, ItemBreakdown.IN, ItemBreakdown.IN);
+                recordMap(s.breakdown, ATTR_OUT, ItemBreakdown.OUT, ItemBreakdown.OUT);
+                recordMap(s.breakdown, ATTR_RESIDUAL,
+                        residualIsProcess ? ItemBreakdown.PRODUCED : ItemBreakdown.IN,
+                        residualIsProcess ? ItemBreakdown.CONSUMED : ItemBreakdown.OUT);
+            }
+            s.lastSampleNanos = now;
+        }
+        return null;
+    }
+
+    private static void addDeltas(Object2LongOpenHashMap<Resource> into, Object2LongOpenHashMap<Resource> deltas) {
+        for (ObjectIterator<Object2LongMap.Entry<Resource>> it = deltas.object2LongEntrySet().fastIterator(); it.hasNext(); ) {
+            Object2LongMap.Entry<Resource> e = it.next();
+            if (e.getLongValue() != 0) {
+                into.addTo(e.getKey(), e.getLongValue());
+            }
+        }
+    }
+
+    /** A neighbour's loss is the machine's Input, its gain the machine's Output; both also balance the residual. */
+    private static void addNeighbourDeltas(SnapshotDiff<?> diff) {
+        if (diff.lastIncrease() == 0 && diff.lastDecrease() == 0) {
+            return;
+        }
+        for (ObjectIterator<Object2LongMap.Entry<Resource>> it = diff.deltas().object2LongEntrySet().fastIterator(); it.hasNext(); ) {
+            Object2LongMap.Entry<Resource> e = it.next();
+            long d = e.getLongValue();
+            if (d < 0) {
+                ATTR_IN.addTo(e.getKey(), d == Long.MIN_VALUE ? Long.MAX_VALUE : -d);
+            } else if (d > 0) {
+                ATTR_OUT.addTo(e.getKey(), d);
+            } else {
+                continue;
+            }
+            ATTR_RESIDUAL.addTo(e.getKey(), d);
+        }
+    }
+
+    /** Adds positive values of a map to totals[itemIdx] or totals[fluidIdx]. */
+    private static void sumInto(Object2LongOpenHashMap<Resource> map, long[] totals, int itemIdx, int fluidIdx,
+            boolean positive) {
+        for (ObjectIterator<Object2LongMap.Entry<Resource>> it = map.object2LongEntrySet().fastIterator(); it.hasNext(); ) {
+            Object2LongMap.Entry<Resource> e = it.next();
+            long v = e.getLongValue();
+            if (v > 0) {
+                int idx = e.getKey() instanceof FluidResource ? fluidIdx : itemIdx;
+                totals[idx] = SnapshotDiff.saturatedAdd(totals[idx], v);
+            }
+        }
+    }
+
+    /** Positive values go to {@code posCategory}, negative ones (as amounts) to {@code negCategory}. */
+    private static void recordMap(ItemBreakdown breakdown, Object2LongOpenHashMap<Resource> map, int posCategory,
+            int negCategory) {
+        for (ObjectIterator<Object2LongMap.Entry<Resource>> it = map.object2LongEntrySet().fastIterator(); it.hasNext(); ) {
+            Object2LongMap.Entry<Resource> e = it.next();
+            long v = e.getLongValue();
+            if (v > 0) {
+                breakdown.record(posCategory, e.getKey(), v);
+            } else if (v < 0) {
+                breakdown.record(negCategory, e.getKey(), v == Long.MIN_VALUE ? Long.MAX_VALUE : -v);
+            }
+        }
+    }
+
     /** Adds one read's changes (items and fluids, kept apart) to one recording. */
     private static void apply(LensSession s, WatchedBlock b, boolean process, boolean itemsChanged,
             boolean fluidsChanged, long inc, long dec, long fInc, long fDec, long now) {
@@ -567,7 +782,8 @@ public final class LensSessionManager {
                 (int) Math.min(s.maxNanos / 1_000_000L, Integer.MAX_VALUE),
                 s.samples, warming, rates[0], rates[1], effectiveMs, eventMode, inc, dec,
                 s.breakdown != null, processing, rates[2], rates[3], items,
-                hasItems, hasFluids, rates[4], rates[5], rates[6], rates[7]);
+                hasItems, hasFluids, rates[4], rates[5], rates[6], rates[7],
+                b.silentInteractTicks >= HIDDEN_TRANSFER_TICKS);
     }
 
     /** Sends current stats, but only while the player has the screen open. */

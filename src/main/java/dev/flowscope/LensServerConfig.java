@@ -40,6 +40,13 @@ public final class LensServerConfig {
                     "slots are read every tick instead of every sampleIntervalTicks (still limited by maxReadsPerTick). 0 = off.")
             .defineInRange("everyTickFallbackMaxSlots", 64, 0, 256);
 
+    public static final ModConfigSpec.BooleanValue COUNT_NEIGHBOUR_TRANSFERS = BUILDER
+            .comment("While a recorded machine runs its own tick, count what it inserts into / extracts from its 6 adjacent",
+                    "blocks by handing it a pass-through wrapper around their item/fluid handlers (committed transfers only).",
+                    "Makes auto-input/auto-output visible even with infinite sources or voiding sinks. Only affects the",
+                    "recorded machine during its own tick. Set to false if a machine behaves differently while recorded.")
+            .define("countNeighbourTransfers", true);
+
     public static final ModConfigSpec.IntValue MAX_VISIBLE_SLOTS = BUILDER
             .comment("Inventories exposing more slots than this are rejected instead of scanned.")
             .defineInRange("maxVisibleSlots", 256, 1, 4096);

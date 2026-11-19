@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import dev.flowscope.LensServerConfig;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.core.BlockPos;
+import net.neoforged.neoforge.capabilities.Capabilities;
+import net.neoforged.neoforge.transfer.ResourceHandler;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.entity.BlockEntity;
@@ -52,6 +54,7 @@ public final class EventSampling {
     private static Level ownLevel;
     private static long ownKey;
     private static boolean neighbourChanged;
+    private static WatchedBlock ownBlock;
 
     private EventSampling() {
     }
@@ -60,6 +63,7 @@ public final class EventSampling {
         perBlockCap = LensServerConfig.MAX_EVENT_READS_PER_SESSION_TICK.getAsInt();
         globalCap = LensServerConfig.MAX_EVENT_READS_PER_TICK.getAsInt();
         maxSlots = LensServerConfig.MAX_VISIBLE_SLOTS.getAsInt();
+        countTransfers = LensServerConfig.COUNT_NEIGHBOUR_TRANSFERS.getAsBoolean();
     }
 
     static int maxSlots() {
@@ -68,9 +72,40 @@ public final class EventSampling {
 
     // ------------------------------------------------------------------ hooks
 
+    // ---- counting handlers (capability wrapping during a recorded machine's own tick) ----
+    /** True only while a recorded machine runs its own tick and wrapping is enabled. Read by the capability mixins. */
+    public static boolean wrapping;
+    /** Nesting depth of BlockCapabilityCache lookups (their internal lookup must not be wrapped). */
+    public static int inCacheLookup;
+    private static boolean countTransfers = true;
+
+    /**
+     * Called by the capability mixins while {@link #wrapping}. Returns a counting pass-through for item/fluid handlers
+     * of blocks adjacent to the ticking recorded machine, otherwise the original object unchanged.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static Object maybeWrap(Object capability, Level level, BlockPos pos, Object original) {
+        WatchedBlock b = ownBlock;
+        if (b == null || level != ownLevel || !(original instanceof ResourceHandler<?> handler)
+                || original instanceof CountingHandler<?> || Thread.currentThread() != b.serverThread) {
+            return original;
+        }
+        if (capability != Capabilities.Item.BLOCK && capability != Capabilities.Fluid.BLOCK) {
+            return original;
+        }
+        long key = pos.asLong();
+        if (key == b.posKey || key == b.partnerKey
+                || Math.abs(pos.getX() - b.pos.getX()) + Math.abs(pos.getY() - b.pos.getY())
+                        + Math.abs(pos.getZ() - b.pos.getZ()) != 1) {
+            return original; // only the machine's 6 direct neighbours, never the machine itself
+        }
+        return new CountingHandler(handler, b.recorder, key);
+    }
+
     /** Called by the ticker mixin right before a flagged block entity ticks. */
     public static void beginOwnTick(Level level, BlockPos pos) {
         ownTickActive = false;
+        wrapping = false;
         if (level.isClientSide()) {
             return;
         }
@@ -80,12 +115,35 @@ public final class EventSampling {
             return;
         }
         for (WatchedBlock b : blocks) {
-            if (b.level == level && b.posKey == key) {
+            if (b.level == level && b.posKey == key && !b.removed) {
                 ownTickActive = true;
                 ownLevel = level;
                 ownKey = key;
+                ownBlock = b;
                 neighbourChanged = false;
+                prepareNeighbours(b);
+                b.recorder.reset();
+                inCacheLookup = 0;
+                wrapping = countTransfers;
                 return;
+            }
+        }
+    }
+
+    /**
+     * Before an active machine ticks: bring the shadows of neighbours that changed since (stale) up to date, so the
+     * changes they show during this tick are exactly what the machine moved. Budgeted; a neighbour left stale is
+     * treated as unmeasurable for this tick.
+     */
+    private static void prepareNeighbours(WatchedBlock b) {
+        Neighbour[] ns = b.neighbours;
+        if (ns == null) {
+            return;
+        }
+        for (Neighbour n : ns) {
+            n.changedThisTick = false;
+            if (n.stale && b.activeMachine && takeBudget(b)) {
+                n.stale = !n.read(maxSlots);
             }
         }
     }
@@ -96,24 +154,185 @@ public final class EventSampling {
             return;
         }
         ownTickActive = false;
-        WatchedBlock[] blocks = BY_POS.get(ownKey);
-        Level level = ownLevel;
+        wrapping = false;
+        inCacheLookup = 0;
+        WatchedBlock b = ownBlock;
+        ownBlock = null;
         ownLevel = null;
-        if (blocks == null) {
+        if (b == null || b.removed || b.pendingEnd != null) {
             return;
         }
-        int mode = neighbourChanged ? LensSessionManager.READ_TRANSFER : LensSessionManager.READ_PROCESS;
-        for (WatchedBlock b : blocks) {
-            if (b.ownChanged && b.level == level && b.posKey == ownKey) {
-                b.ownChanged = false;
-                eventRead(b, mode);
+        boolean neighboursChanged = false;
+        Neighbour[] ns = b.neighbours;
+        if (ns != null) {
+            for (Neighbour n : ns) {
+                neighboursChanged |= n.changedThisTick;
             }
         }
+        boolean captured = b.recorder.committedCount() > 0;
+        boolean active = b.ownChanged || neighboursChanged || captured;
+        b.activeMachine = b.ownChanged;
+        if (!active) {
+            return;
+        }
+        b.ownChanged = false;
+        attributedRead(b, neighbourChanged);
+        if (ns == null && b.activeMachine) {
+            createNeighbours(b); // first time this block changed in its own tick: start watching its neighbours
+        }
+    }
+
+    /**
+     * Reads the machine and the neighbours that changed during its tick, and splits the change into in/out and
+     * made/used up (see LensSessionManager.readAttributed). Needs one read plus one per changed neighbour from the
+     * budget; without enough budget it falls back to the plain rule and the neighbours are refreshed later.
+     */
+    private static void attributedRead(WatchedBlock b, boolean foreign) {
+        Neighbour[] ns = b.neighbours;
+        int needed = 1;
+        if (ns != null) {
+            for (Neighbour n : ns) {
+                if (n.changedThisTick) {
+                    needed++;
+                }
+            }
+        }
+        boolean captured = b.recorder.committedCount() > 0;
+        if ((needed == 1 && !captured) || !hasBudget(b, needed)) {
+            boolean anyNeighbour = needed > 1;
+            if (ns != null) {
+                for (Neighbour n : ns) {
+                    if (n.changedThisTick) {
+                        n.stale = true;
+                        n.changedThisTick = false;
+                    }
+                }
+            }
+            int before = b.reportedChanges;
+            eventRead(b, foreign || anyNeighbour ? LensSessionManager.READ_TRANSFER : LensSessionManager.READ_PROCESS);
+            if (b.reportedChanges != before) {
+                b.silentInteractTicks = 0;
+            } else if (foreign || anyNeighbour) {
+                b.silentInteractTicks++; // it moved things around, but nothing measurable changed (for the hint)
+            }
+            return;
+        }
+        for (int i = 0; i < needed; i++) {
+            takeBudget(b);
+        }
+        SessionState reason = LensSessionManager.readAttributed(b, System.nanoTime(), maxSlots, foreign);
+        if (reason != null) {
+            b.pendingEnd = reason;
+        }
+    }
+
+    private static void syncBudgetTick(WatchedBlock b) {
+        long tick = b.level.getServer().getTickCount();
+        if (tick != b.eventTick) {
+            b.eventTick = tick;
+            b.eventReads = 0;
+        }
+        if (tick != globalTick) {
+            globalTick = tick;
+            globalReads = 0;
+        }
+    }
+
+    private static boolean hasBudget(WatchedBlock b, int reads) {
+        syncBudgetTick(b);
+        return b.eventReads + reads <= perBlockCap + 6 && globalReads + reads <= globalCap;
+    }
+
+    /** Takes one read from the per-tick budgets (neighbour reads get 6 extra per block). */
+    private static boolean takeBudget(WatchedBlock b) {
+        if (!hasBudget(b, 1)) {
+            return false;
+        }
+        b.eventReads++;
+        globalReads++;
+        return true;
+    }
+
+    /** Looks up the up to 6 adjacent inventories and takes their baseline. */
+    private static void createNeighbours(WatchedBlock b) {
+        ArrayList<Neighbour> list = new ArrayList<>(6);
+        for (net.minecraft.core.Direction d : net.minecraft.core.Direction.values()) {
+            long key = b.pos.relative(d).asLong();
+            if (key == b.partnerKey) {
+                continue; // the other half of a double chest is part of the block itself
+            }
+            Neighbour n;
+            try {
+                n = Neighbour.create(b, d);
+            } catch (RuntimeException e) {
+                n = null;
+            }
+            if (n != null) {
+                list.add(n);
+            }
+        }
+        Neighbour[] ns = list.toArray(new Neighbour[0]);
+        for (Neighbour n : ns) {
+            index(b, n.posKey);
+        }
+        b.neighbours = ns;
+        b.neighbourBlockEntities = countNeighbourBlockEntities(b);
+    }
+
+    /** Re-creates neighbours whose block entity was replaced or removed (checked on safety-net reads). */
+    private static void refreshNeighbours(WatchedBlock b) {
+        Neighbour[] ns = b.neighbours;
+        if (ns == null) {
+            return;
+        }
+        boolean changed = false;
+        for (Neighbour n : ns) {
+            if (!b.level.isLoaded(n.pos) || b.level.getBlockEntity(n.pos) != n.blockEntity) {
+                changed = true;
+                break;
+            }
+        }
+        if (!changed) {
+            // A block entity may also have appeared or disappeared next to the machine.
+            changed = countNeighbourBlockEntities(b) != b.neighbourBlockEntities;
+        }
+        if (changed) {
+            releaseNeighbours(b);
+            createNeighbours(b);
+        }
+    }
+
+    private static int countNeighbourBlockEntities(WatchedBlock b) {
+        int present = 0;
+        for (net.minecraft.core.Direction d : net.minecraft.core.Direction.values()) {
+            BlockPos p = b.pos.relative(d);
+            if (p.asLong() != b.partnerKey && b.level.isLoaded(p) && b.level.getBlockEntity(p) != null) {
+                present++;
+            }
+        }
+        return present;
+    }
+
+    private static void releaseNeighbours(WatchedBlock b) {
+        Neighbour[] ns = b.neighbours;
+        if (ns == null) {
+            return;
+        }
+        for (Neighbour n : ns) {
+            n.discarded = true;
+            if (n.posKey != b.posKey && n.posKey != b.partnerKey) {
+                unindex(b, n.posKey);
+            }
+        }
+        b.neighbours = null;
     }
 
     /** Safety reset at the end of every server tick (e.g. if a ticker threw before endOwnTick ran). */
     static void resetOwnTick() {
         ownTickActive = false;
+        wrapping = false;
+        inCacheLookup = 0;
+        ownBlock = null;
         ownLevel = null;
     }
 
@@ -121,14 +340,29 @@ public final class EventSampling {
     public static void onBlockChanged(Level level, BlockPos pos) {
         long key = pos.asLong();
         if (ownTickActive && level == ownLevel && key != ownKey) {
-            neighbourChanged = true;
+            // Another block changed during the watched block's own tick: a measured neighbour (attributed exactly
+            // at the end of the tick) or something else (then the plain rule applies: it moved items itself).
+            Neighbour n = ownBlock != null ? ownBlock.neighbour(key) : null;
+            if (n != null) {
+                n.changedThisTick = true;
+            } else if (ownBlock == null || key != ownBlock.partnerKey) {
+                neighbourChanged = true;
+            }
         }
         WatchedBlock[] blocks = BY_POS.get(key);
         if (blocks == null) {
             return;
         }
         for (WatchedBlock b : blocks) {
-            if (b.level != level || (b.posKey != key && b.partnerKey != key)) {
+            if (b.level != level) {
+                continue;
+            }
+            if (b.posKey != key && b.partnerKey != key) {
+                // A neighbour of a watched machine changed outside the machine's tick: refresh it before the next one.
+                Neighbour n = b.neighbour(key);
+                if (n != null && !(ownTickActive && b == ownBlock)) {
+                    n.stale = true;
+                }
                 continue;
             }
             if (b.removed || b.pendingEnd != null || b.reading || Thread.currentThread() != b.serverThread) {
@@ -147,15 +381,7 @@ public final class EventSampling {
         if (b.removed || b.pendingEnd != null) {
             return;
         }
-        long tick = b.level.getServer().getTickCount();
-        if (tick != b.eventTick) {
-            b.eventTick = tick;
-            b.eventReads = 0;
-        }
-        if (tick != globalTick) {
-            globalTick = tick;
-            globalReads = 0;
-        }
+        syncBudgetTick(b);
         if (b.eventReads < perBlockCap && globalReads < globalCap) {
             b.eventReads++;
             globalReads++;
@@ -187,6 +413,7 @@ public final class EventSampling {
         }
         b.removed = true;
         activeBlocks--;
+        releaseNeighbours(b);
         unindex(b, b.posKey);
         unindex(b, b.partnerKey);
         setFlag(b, null);
@@ -206,6 +433,12 @@ public final class EventSampling {
         for (WatchedBlock b : BLOCKS) {
             b.removed = true;
             setFlag(b, null);
+            if (b.neighbours != null) {
+                for (Neighbour n : b.neighbours) {
+                    n.discarded = true;
+                }
+                b.neighbours = null;
+            }
         }
         BLOCKS.clear();
         BY_POS.clear();
@@ -252,6 +485,7 @@ public final class EventSampling {
             b.partnerKey = partner;
             index(b, partner);
         }
+        refreshNeighbours(b);
     }
 
     private static void index(WatchedBlock b, long key) {

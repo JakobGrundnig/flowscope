@@ -53,6 +53,30 @@ public final class WatchedBlock {
     /** Set when a change-triggered read failed; the tick handler ends the recordings (never from foreign code). */
     SessionState pendingEnd;
 
+    // ---- neighbour attribution (auto-input/auto-output during the block's own tick) ----
+    /** Adjacent inventories, created once the block changes during its own tick (null = not yet / not a machine). */
+    Neighbour[] neighbours;
+    /** The block changed during its last own tick: keep neighbour shadows fresh before its next tick. */
+    boolean activeMachine;
+    /** Own ticks in a row in which the block interacted with neighbours but nothing could be counted. */
+    int silentInteractTicks;
+    /** Block entities next to the block when the neighbours were created (detects placed/removed neighbours). */
+    int neighbourBlockEntities;
+    /** Transfers to/from adjacent blocks seen through counting handlers during the current own tick. */
+    final TransferRecorder recorder = new TransferRecorder();
+
+    Neighbour neighbour(long key) {
+        Neighbour[] ns = neighbours;
+        if (ns != null) {
+            for (Neighbour n : ns) {
+                if (n.posKey == key) {
+                    return n;
+                }
+            }
+        }
+        return null;
+    }
+
     // ---- safety-net timer ----
     long nextTimerTick;
     int sampleIntervalTicks;

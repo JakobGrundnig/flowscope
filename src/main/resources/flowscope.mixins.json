@@ -3,7 +3,9 @@
   "package": "dev.flowscope.mixin",
   "mixins": [
     "BlockEntityMixin",
-    "BlockEntityTickerMixin"
+    "BlockEntityTickerMixin",
+    "BlockCapabilityMixin",
+    "BlockCapabilityCacheMixin"
   ],
   "client": [],
   "injectors": {
