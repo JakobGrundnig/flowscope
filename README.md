@@ -4,7 +4,7 @@ A handheld lens for NeoForge that shows how fast items and fluids flow into and 
 
 - Read-only: never inserts, extracts or changes the watched block.
 - No work when idle: nothing ticks or scans unless a player is recording.
-- Works with any block that exposes NeoForge's standard item or fluid capability. No other mods needed.
+- Works with any block that exposes NeoForge's standard item or fluid capability. No other mods needed. See [COMPATIBILITY.md](COMPATIBILITY.md) for what has been tested.
 
 ## Versions
 | Minecraft | NeoForge | Java |
